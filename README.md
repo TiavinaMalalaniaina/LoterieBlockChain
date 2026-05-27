@@ -69,6 +69,7 @@ Crée un compte gratuit sur [Infura](https://infura.io) ou [Alchemy](https://alc
 ### 2. Obtenir des ETH de test
 
 Utilise un faucet gratuit :
+- https://sepolia-faucet.pk910.de (recommandé)
 - https://sepoliafaucet.com
 - https://faucets.chain.link
 
