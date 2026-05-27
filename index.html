@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OnChain Lottery</title>
+    <link rel="stylesheet" href="index.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="ethers.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div class="logo">
+          <div class="logo-icon">🎰</div>
+          <div>
+            <h1>OnChain Lottery</h1>
+            <p id="network-label">Non connecté</p>
+          </div>
+        </div>
+        <button id="btn-connect" onclick="connectWallet()">
+          <div class="dot" id="wallet-dot"></div>
+          <span id="btn-connect-label">Connecter MetaMask</span>
+        </button>
+      </header>
+
+      <!-- Alerte globale -->
+      <div class="alert warn" id="alert-metamask">
+        ⚠️ MetaMask non détecté. Installez l'extension sur
+        <a
+          href="https://metamask.io"
+          target="_blank"
+          style="color: inherit; text-decoration: underline"
+          >metamask.io</a
+        >
+        pour interagir avec le contrat.
+      </div>
+      <div class="alert warn" id="alert-warn"></div>
+      <div class="alert err" id="alert-err"></div>
+      <div class="alert ok" id="alert-ok"></div>
+
+      <!-- Adresse du contrat -->
+      <div class="contract-bar">
+        <label>Contrat</label>
+        <input
+          type="text"
+          id="contract-address"
+          placeholder="0x… adresse du contrat déployé"
+          spellcheck="false"
+        />
+        <button id="btn-load-contract" onclick="loadContract()">
+          Charger ↗
+        </button>
+      </div>
+
+      <!-- Winner banner -->
+      <div class="winner-box" id="winner-box">
+        <div class="winner-trophy">🏆</div>
+        <div>
+          <div class="winner-label">
+            Gagnant — Round <span id="w-round"></span>
+          </div>
+          <div class="winner-addr" id="w-addr"></div>
+        </div>
+        <div class="winner-prize">
+          <div class="winner-prize-val" id="w-prize"></div>
+          <div class="winner-prize-label">ETH remportés</div>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats animate-in">
+        <div class="stat">
+          <div class="stat-label">Prize Pool</div>
+          <div class="stat-value" id="s-pool">—</div>
+          <div class="stat-unit">ETH</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Participants</div>
+          <div class="stat-value" id="s-players">—</div>
+          <div class="stat-unit">tickets vendus</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Prix ticket</div>
+          <div class="stat-value" id="s-price">—</div>
+          <div class="stat-unit">ETH / ticket</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Round</div>
+          <div class="stat-value" id="s-round">—</div>
+          <div class="stat-unit" id="s-state">en cours</div>
+        </div>
+      </div>
+
+      <!-- Round card -->
+      <div class="round-card animate-in">
+        <div class="round-header">
+          <div class="round-title">Round <span id="r-id">—</span></div>
+          <span class="badge badge-open" id="r-badge"
+            ><span class="badge-dot"></span> Ouvert</span
+          >
+        </div>
+        <div class="timer-row">
+          <span class="timer-label">Temps restant</span>
+          <span class="timer-val" id="r-timer">—</span>
+        </div>
+        <div class="progress">
+          <div class="progress-fill" id="r-progress" style="width: 100%"></div>
+        </div>
+        <div
+          style="display: flex; justify-content: space-between; margin-top: 8px"
+        >
+          <span
+            style="
+              font-size: 11px;
+              font-family: var(--mono);
+              color: var(--text3);
+            "
+            id="r-start"
+            >Début —</span
+          >
+          <span
+            style="
+              font-size: 11px;
+              font-family: var(--mono);
+              color: var(--text3);
+            "
+            id="r-end"
+            >Fin —</span
+          >
+        </div>
+      </div>
+
+      <!-- Buy + Admin -->
+      <div class="grid-2 animate-in">
+        <!-- Buy tickets -->
+        <div class="card">
+          <div class="card-title">Acheter des tickets</div>
+
+          <div class="field">
+            <label>Quantité</label>
+            <div class="stepper">
+              <button class="stepper-btn" onclick="changeQty(-1)">−</button>
+              <div class="stepper-val" id="qty-val">1</div>
+              <button class="stepper-btn" onclick="changeQty(1)">+</button>
+            </div>
+          </div>
+
+          <div class="cost-row">
+            <span class="cost-label">Coût total</span>
+            <span class="cost-val" id="cost-total">— ETH</span>
+          </div>
+
+          <div class="field" style="margin-bottom: 4px">
+            <label>Vos chances estimées</label>
+            <div
+              style="
+                font-family: var(--mono);
+                font-size: 13px;
+                color: var(--text2);
+              "
+              id="odds"
+            >
+              Chargez le contrat
+            </div>
+          </div>
+
+          <div style="height: 12px"></div>
+          <button
+            class="btn-accent"
+            id="btn-buy"
+            onclick="buyTickets()"
+            disabled
+          >
+            Acheter des tickets
+          </button>
+          <div
+            style="
+              font-size: 11px;
+              font-family: var(--mono);
+              color: var(--text3);
+              text-align: center;
+              margin-top: 8px;
+            "
+            id="buy-status"
+          ></div>
+        </div>
+
+        <!-- Admin -->
+        <div class="card">
+          <div class="card-title">Actions</div>
+
+          <button
+            class="btn-ghost"
+            id="btn-draw"
+            onclick="triggerDraw()"
+            disabled
+          >
+            ⚡ triggerDraw() <span style="font-size:10px;opacity:0.6">(public)</span>
+          </button>
+          <button
+            class="btn-ghost"
+            id="btn-skip"
+            onclick="skipRound()"
+            disabled
+          >
+            ↷ skipEmptyRound() <span style="font-size:10px;opacity:0.6">(owner)</span>
+          </button>
+          <button
+            class="btn-ghost"
+            id="btn-refresh"
+            onclick="refreshData()"
+            disabled
+          >
+            ↻ Rafraîchir les données
+          </button>
+
+          <div
+            style="
+              border-top: 1px solid var(--border);
+              margin-top: 8px;
+              padding-top: 12px;
+            "
+          >
+            <div
+              style="
+                font-size: 11px;
+                font-family: var(--mono);
+                color: var(--text3);
+                margin-bottom: 4px;
+              "
+            >
+              Owner du contrat
+            </div>
+            <div
+              style="
+                font-family: var(--mono);
+                font-size: 12px;
+                color: var(--text2);
+                word-break: break-all;
+              "
+              id="owner-addr"
+            >
+              —
+            </div>
+          </div>
+          <div style="margin-top: 10px">
+            <div
+              style="
+                font-size: 11px;
+                font-family: var(--mono);
+                color: var(--text3);
+                margin-bottom: 4px;
+              "
+            >
+              Frais propriétaire
+            </div>
+            <div
+              style="
+                font-family: var(--mono);
+                font-size: 13px;
+                font-weight: 500;
+              "
+              id="fee-bps"
+            >
+              5%
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Players + Log -->
+      <div class="grid-2 animate-in">
+        <div class="card">
+          <div class="card-title">Participants du round</div>
+          <div id="players-list">
+            <div
+              style="
+                font-size: 12px;
+                font-family: var(--mono);
+                color: var(--text3);
+                padding: 20px 0;
+                text-align: center;
+              "
+            >
+              Connectez-vous pour voir les participants
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Journal on-chain</div>
+          <div id="event-log">
+            <div
+              style="
+                font-size: 12px;
+                font-family: var(--mono);
+                color: var(--text3);
+                padding: 20px 0;
+                text-align: center;
+              "
+            >
+              En attente de connexion…
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="toast" id="toast"></div>
+  </body>
+</html>
