@@ -106,7 +106,10 @@ async function connectWallet() {
     window.ethereum.on("accountsChanged", () => location.reload());
     window.ethereum.on("chainChanged", () => location.reload());
   } catch (e) {
-    showAlert("err", "Connexion refusée: " + e.message);
+    const msg = e.code === 4001 || e.code === "ACTION_REJECTED"
+      ? "Connexion refusée par l'utilisateur."
+      : "Impossible de se connecter à MetaMask : " + (e.message || "erreur inconnue");
+    showAlert("err", msg);
     document.getElementById("wallet-dot").className = "dot err";
   }
 }
@@ -129,7 +132,7 @@ async function loadContract() {
     const code = await provider.getCode(addr);
     if (code === "0x") {
       const network = await provider.getNetwork();
-      showAlert("err", `Aucun contrat à cette adresse sur le réseau ${network.name} (chainId ${network.chainId}). Vérifie que le nœud Hardhat tourne et que MetaMask est sur Hardhat Local (31337).`);
+      showAlert("err", `Aucun contrat trouvé à cette adresse sur ${network.name} (chainId ${network.chainId}). Vérifiez que MetaMask est sur le bon réseau et que le contrat est bien déployé.`);
       return;
     }
 
@@ -155,7 +158,7 @@ async function loadContract() {
     showAlert("ok", `Contrat chargé : ${fmt(addr)}`);
     setTimeout(() => hideAlert("ok"), 3000);
   } catch (e) {
-    showAlert("err", "Erreur chargement contrat: " + parseError(e));
+    showAlert("err", "Impossible de charger le contrat : " + parseError(e));
     console.error(e);
   }
 }
@@ -167,7 +170,7 @@ async function refreshData() {
     renderRound(roundData);
     await renderPlayers(roundData);
   } catch (e) {
-    showAlert("err", "Erreur lecture: " + parseError(e));
+    showAlert("err", "Impossible de lire les données du contrat : " + parseError(e));
   }
 }
 
@@ -333,8 +336,8 @@ async function buyTickets() {
     await refreshData();
   } catch (e) {
     const msg = parseError(e);
-    showAlert("err", "Erreur: " + msg);
-    addLog("❌", "Achat échoué: " + msg);
+    showAlert("err", "Achat échoué : " + msg);
+    addLog("❌", "Achat échoué : " + msg);
   } finally {
     btn.disabled = false;
     btn.textContent = "Acheter des tickets";
@@ -375,8 +378,8 @@ async function adminAction(method, args, label) {
     await refreshData();
   } catch (e) {
     const msg = parseError(e);
-    showAlert("err", "Erreur: " + msg);
-    addLog("❌", msg);
+    showAlert("err", label + " échoué : " + msg);
+    addLog("❌", label + " échoué : " + msg);
   } finally {
     btn.disabled = false;
     btn.textContent = origText;
@@ -471,24 +474,55 @@ function showToast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
 }
 
-function parseError(e) {
-  if (e.errorName) return e.errorName;
-  if (e.revert?.name) return e.revert.name;
-  if (e.reason) return e.reason;
+const CONTRACT_ERRORS = {
+  RoundNotOpen:               "Le round n'est pas ouvert aux participations.",
+  RoundNotEnded:              "Le round n'est pas encore terminé — attendez la fin du timer.",
+  RoundAlreadyDrawing:        "Un tirage est déjà en cours pour ce round.",
+  NotEnoughETH:               "Montant incorrect. Vérifiez le nombre de tickets et le prix.",
+  TooManyPlayers:             "Capacité maximale du round atteinte.",
+  NoPlayers:                  "Aucun participant — impossible de tirer au sort.",
+  RoundHasPlayers:            "Des joueurs ont participé, utilisez triggerDraw() pour tirer au sort.",
+  TransferFailed:             "Échec du transfert ETH vers le gagnant.",
+  InvalidDuration:            "Durée du round invalide (doit être supérieure à 0).",
+  InvalidPrice:               "Prix du ticket invalide (doit être supérieur à 0).",
+  OwnableUnauthorizedAccount: "Action réservée au propriétaire du contrat.",
+  OwnableInvalidOwner:        "Adresse du propriétaire invalide.",
+};
 
-  // Décode le selector brut via l'interface du contrat (ex: estimateGas revert)
+function parseError(e) {
+  // 1. Nom d'erreur décodé par ethers
+  const name = e.errorName || e.revert?.name;
+  if (name && CONTRACT_ERRORS[name]) return CONTRACT_ERRORS[name];
+  if (name) return name;
+
+  // 2. Décodage manuel du selector (estimateGas, MetaMask)
   const data = e.data ?? e.error?.data;
   if (data && data !== "0x" && contract) {
     try {
       const decoded = contract.interface.parseError(data);
-      if (decoded) return decoded.name;
+      if (decoded) return CONTRACT_ERRORS[decoded.name] ?? decoded.name;
     } catch {}
   }
 
-  const m = e.message || "";
-  const match = m.match(/reverted with reason string '(.+?)'/);
+  // 3. Erreurs MetaMask / ethers connues
+  const code = e.code || e.error?.code;
+  const msg  = e.message || "";
+
+  if (code === 4001 || code === "ACTION_REJECTED" || msg.includes("user rejected"))
+    return "Transaction annulée par l'utilisateur.";
+  if (code === "INSUFFICIENT_FUNDS" || msg.includes("insufficient funds"))
+    return "Fonds ETH insuffisants dans votre wallet.";
+  if (code === "NETWORK_ERROR" || msg.includes("network"))
+    return "Erreur réseau — vérifiez votre connexion et le réseau MetaMask.";
+  if (msg.includes("nonce"))
+    return "Erreur de nonce — réinitialisez votre compte MetaMask (Paramètres → Avancé → Réinitialiser).";
+
+  // 4. Raison lisible
+  if (e.reason) return e.reason;
+  const match = msg.match(/reverted with reason string '(.+?)'/);
   if (match) return match[1];
-  return m.slice(0, 100) || "Erreur inconnue";
+
+  return msg.slice(0, 120) || "Erreur inconnue.";
 }
 
 function fmt(addr) {
