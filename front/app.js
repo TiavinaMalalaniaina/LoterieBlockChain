@@ -1,3 +1,9 @@
+// ═══════════════════════════════════════════
+//  CONFIG — mettre l'adresse du contrat ici
+// ═══════════════════════════════════════════
+const CONTRACT_ADDRESS = "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707"; // ex: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+// ═══════════════════════════════════════════
+
 // ───────────────────────────────────────────
 // ABI — extrait du contrat Lottery.sol
 // ───────────────────────────────────────────
@@ -14,12 +20,16 @@ const ABI = [
   "function buyTickets(uint256 _amount) payable",
   "function triggerDraw()",
   "function skipEmptyRound()",
+  "function transferOwnership(address newOwner)",
+  "function renounceOwnership()",
   "event RoundStarted(uint256 indexed roundId, uint256 ticketPrice, uint256 endTime)",
   "event TicketPurchased(uint256 indexed roundId, address indexed player, uint256 tickets)",
   "event DrawTriggered(uint256 indexed roundId)",
   "event WinnerPicked(uint256 indexed roundId, address indexed winner, uint256 prize)",
   "event RoundClosed(uint256 indexed roundId)",
-  "error NotOwner()",
+  "event OwnershipTransferred(address indexed previousOwner, address indexed newOwner)",
+  "error OwnableUnauthorizedAccount(address account)",
+  "error OwnableInvalidOwner(address owner)",
   "error RoundNotOpen()",
   "error RoundNotEnded()",
   "error RoundAlreadyDrawing()",
@@ -51,10 +61,16 @@ window.addEventListener("DOMContentLoaded", () => {
     document.getElementById("alert-metamask").classList.add("show");
   }
 
-  // Pré-remplir adresse depuis le hash de l'URL si présent
-  const hash = location.hash.replace("#", "");
-  if (hash.startsWith("0x")) {
-    document.getElementById("contract-address").value = hash;
+  // Priorité : CONTRACT_ADDRESS > hash URL > saisie manuelle
+  const addr = CONTRACT_ADDRESS || location.hash.replace("#", "");
+  if (ethers.isAddress(addr)) {
+    const input = document.getElementById("contract-address");
+    input.value = addr;
+    if (CONTRACT_ADDRESS) {
+      input.readOnly = true;
+      input.style.opacity = "0.5";
+      input.style.cursor  = "not-allowed";
+    }
   }
 });
 
@@ -82,8 +98,8 @@ async function connectWallet() {
     addLog("🔌", `Wallet connecté: ${fmt(userAddress)}`);
     hideAlert("err");
 
-    // Charger le contrat si l'adresse est déjà saisie
-    const addr = document.getElementById("contract-address").value.trim();
+    // Charger automatiquement si CONTRACT_ADDRESS défini, sinon depuis le champ
+    const addr = CONTRACT_ADDRESS || document.getElementById("contract-address").value.trim();
     if (ethers.isAddress(addr)) loadContract();
 
     // Écoute les changements de compte
@@ -99,7 +115,7 @@ async function connectWallet() {
 // Contract
 // ───────────────────────────────────────────
 async function loadContract() {
-  const addr = document.getElementById("contract-address").value.trim();
+  const addr = CONTRACT_ADDRESS || document.getElementById("contract-address").value.trim();
   if (!ethers.isAddress(addr)) {
     showAlert("err", "Adresse invalide.");
     return;

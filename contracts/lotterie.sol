@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title Lottery
@@ -7,7 +10,7 @@ pragma solidity ^0.8.19;
  *         (version simplifiée utilisant un pseudo-aléatoire pour les tests locaux)
  * @dev Pour la production, remplacer _requestRandomness() par Chainlink VRF v2
  */
-contract Lottery {
+contract Lottery is Ownable, ReentrancyGuard {
 
     // ─────────────────────────────────────────────────────────────
     //  Types
@@ -30,15 +33,14 @@ contract Lottery {
     //  Storage
     // ─────────────────────────────────────────────────────────────
 
-    address public immutable owner;
     uint256 public immutable ticketPrice;        // prix en wei
     uint256 public immutable maxPlayers;         // 0 = illimité
     uint256 public immutable durationSeconds;    // durée d'un round
     uint256 public constant OWNER_FEE_BPS = 500; // 5 % pour le gestionnaire
 
     uint256 public currentRoundId;
-    mapping(uint256 => Round)    public rounds;
-    mapping(uint256 => mapping(address => uint256)) public ticketsPerPlayer; // roundId → player → nb tickets
+    mapping(uint256 => Round) public rounds;
+    mapping(uint256 => mapping(address => uint256)) public ticketsPerPlayer;
 
     // ─────────────────────────────────────────────────────────────
     //  Events
@@ -51,10 +53,9 @@ contract Lottery {
     event RoundClosed(uint256 indexed roundId);
 
     // ─────────────────────────────────────────────────────────────
-    //  Errors (Solidity custom errors — gas efficient)
+    //  Errors
     // ─────────────────────────────────────────────────────────────
 
-    error NotOwner();
     error RoundNotOpen();
     error RoundNotEnded();
     error RoundAlreadyDrawing();
@@ -69,11 +70,6 @@ contract Lottery {
     // ─────────────────────────────────────────────────────────────
     //  Modifiers
     // ─────────────────────────────────────────────────────────────
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
-        _;
-    }
 
     modifier roundIsOpen() {
         if (rounds[currentRoundId].state != State.OPEN) revert RoundNotOpen();
@@ -93,11 +89,10 @@ contract Lottery {
         uint256 _ticketPrice,
         uint256 _maxPlayers,
         uint256 _durationSecs
-    ) {
-        if (_ticketPrice == 0)   revert InvalidPrice();
-        if (_durationSecs == 0)  revert InvalidDuration();
+    ) Ownable(msg.sender) {
+        if (_ticketPrice == 0)  revert InvalidPrice();
+        if (_durationSecs == 0) revert InvalidDuration();
 
-        owner           = msg.sender;
         ticketPrice     = _ticketPrice;
         maxPlayers      = _maxPlayers;
         durationSeconds = _durationSecs;
@@ -114,19 +109,16 @@ contract Lottery {
      *         Envoyer exactement ticketPrice * nombre de tickets en ETH.
      * @param _amount Nombre de tickets à acheter
      */
-    function buyTickets(uint256 _amount) external payable roundIsOpen {
+    function buyTickets(uint256 _amount) external payable roundIsOpen nonReentrant {
         if (_amount == 0 || msg.value != ticketPrice * _amount) revert NotEnoughETH();
 
         Round storage r = rounds[currentRoundId];
 
-        // Vérification du round encore ouvert dans le temps
         if (block.timestamp >= r.endTime) revert RoundNotOpen();
 
-        // Vérification capacité max
         if (maxPlayers > 0 && r.players.length + _amount > maxPlayers)
             revert TooManyPlayers();
 
-        // Enregistrement
         for (uint256 i = 0; i < _amount; i++) {
             r.players.push(msg.sender);
         }
@@ -144,12 +136,12 @@ contract Lottery {
      * @notice Déclenche le tirage du round courant.
      *         Peut être appelé par n'importe qui une fois le round terminé.
      */
-    function triggerDraw() external {
+    function triggerDraw() external nonReentrant {
         Round storage r = rounds[currentRoundId];
 
-        if (r.state != State.OPEN)              revert RoundAlreadyDrawing();
-        if (block.timestamp < r.endTime)        revert RoundNotEnded();
-        if (r.players.length == 0)              revert NoPlayers();
+        if (r.state != State.OPEN)       revert RoundAlreadyDrawing();
+        if (block.timestamp < r.endTime) revert RoundNotEnded();
+        if (r.players.length == 0)       revert NoPlayers();
 
         r.state = State.DRAWING;
         emit DrawTriggered(currentRoundId);
@@ -164,8 +156,8 @@ contract Lottery {
     function skipEmptyRound() external onlyOwner {
         Round storage r = rounds[currentRoundId];
         if (r.state != State.OPEN)        revert RoundAlreadyDrawing();
-        if (block.timestamp < r.endTime) revert RoundNotEnded();
-        if (r.players.length > 0)        revert RoundHasPlayers();
+        if (block.timestamp < r.endTime)  revert RoundNotEnded();
+        if (r.players.length > 0)         revert RoundHasPlayers();
 
         r.state = State.CLOSED;
         emit RoundClosed(currentRoundId);
@@ -217,7 +209,6 @@ contract Lottery {
         address winner      = r.players[winnerIndex];
         r.winner            = winner;
 
-        // Calcul des frais et du prix net
         uint256 fee   = (r.prizePool * OWNER_FEE_BPS) / 10_000;
         uint256 prize = r.prizePool - fee;
 
@@ -225,11 +216,9 @@ contract Lottery {
         emit WinnerPicked(roundId, winner, prize);
         emit RoundClosed(roundId);
 
-        // Transferts
         _safeTransfer(winner, prize);
-        if (fee > 0) _safeTransfer(owner, fee);
+        if (fee > 0) _safeTransfer(owner(), fee);
 
-        // Démarrage automatique du round suivant
         _startNewRound();
     }
 
