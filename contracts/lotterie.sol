@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
+import "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
 
 /**
  * @title Lottery
- * @notice Loterie on-chain décentralisée avec tirage au sort via Chainlink VRF
- *         (version simplifiée utilisant un pseudo-aléatoire pour les tests locaux)
- * @dev Pour la production, remplacer _requestRandomness() par Chainlink VRF v2
+ * @notice Loterie on-chain — rounds démarrés manuellement par le owner.
+ *         Tirage via Chainlink VRF v2.5.
  */
-contract Lottery is Ownable, ReentrancyGuard {
+contract Lottery is VRFConsumerBaseV2Plus, ReentrancyGuard {
 
     // ─────────────────────────────────────────────────────────────
     //  Types
@@ -30,15 +31,28 @@ contract Lottery is Ownable, ReentrancyGuard {
     }
 
     // ─────────────────────────────────────────────────────────────
+    //  Chainlink VRF v2.5
+    // ─────────────────────────────────────────────────────────────
+
+    IVRFCoordinatorV2Plus private immutable i_vrfCoordinator;
+    bytes32  private immutable i_keyHash;
+    uint256  private immutable i_subscriptionId;
+    uint32   private constant  CALLBACK_GAS_LIMIT    = 100_000;
+    uint16   private constant  REQUEST_CONFIRMATIONS  = 3;
+    uint32   private constant  NUM_WORDS              = 1;
+
+    mapping(uint256 => uint256) public vrfRequestToRound;
+
+    // ─────────────────────────────────────────────────────────────
     //  Storage
     // ─────────────────────────────────────────────────────────────
 
-    uint256 public immutable ticketPrice;        // prix en wei
-    uint256 public immutable maxPlayers;         // 0 = illimité
-    uint256 public immutable durationSeconds;    // durée d'un round
-    uint256 public constant OWNER_FEE_BPS = 500; // 5 % pour le gestionnaire
+    uint256 public ticketPrice;            // modifiable par le owner hors round
+    uint256 public immutable maxPlayers;
+    uint256 public durationSeconds;        // modifiable par le owner hors round
+    uint256 public constant  OWNER_FEE_BPS = 500;
 
-    uint256 public currentRoundId;
+    uint256 public currentRoundId;        // 0 = aucun round démarré
     mapping(uint256 => Round) public rounds;
     mapping(uint256 => mapping(address => uint256)) public ticketsPerPlayer;
 
@@ -48,9 +62,11 @@ contract Lottery is Ownable, ReentrancyGuard {
 
     event RoundStarted(uint256 indexed roundId, uint256 ticketPrice, uint256 endTime);
     event TicketPurchased(uint256 indexed roundId, address indexed player, uint256 tickets);
-    event DrawTriggered(uint256 indexed roundId);
+    event DrawTriggered(uint256 indexed roundId, uint256 requestId);
     event WinnerPicked(uint256 indexed roundId, address indexed winner, uint256 prize);
     event RoundClosed(uint256 indexed roundId);
+    event TicketPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event DurationUpdated(uint256 oldDuration, uint256 newDuration);
 
     // ─────────────────────────────────────────────────────────────
     //  Errors
@@ -58,6 +74,7 @@ contract Lottery is Ownable, ReentrancyGuard {
 
     error RoundNotOpen();
     error RoundNotEnded();
+    error RoundAlreadyOpen();
     error RoundAlreadyDrawing();
     error NotEnoughETH();
     error TooManyPlayers();
@@ -72,7 +89,16 @@ contract Lottery is Ownable, ReentrancyGuard {
     // ─────────────────────────────────────────────────────────────
 
     modifier roundIsOpen() {
-        if (rounds[currentRoundId].state != State.OPEN) revert RoundNotOpen();
+        if (currentRoundId == 0 || rounds[currentRoundId].state != State.OPEN)
+            revert RoundNotOpen();
+        _;
+    }
+
+    modifier noActiveRound() {
+        if (currentRoundId > 0 && rounds[currentRoundId].state == State.OPEN)
+            revert RoundAlreadyOpen();
+        if (currentRoundId > 0 && rounds[currentRoundId].state == State.DRAWING)
+            revert RoundAlreadyDrawing();
         _;
     }
 
@@ -80,44 +106,93 @@ contract Lottery is Ownable, ReentrancyGuard {
     //  Constructor
     // ─────────────────────────────────────────────────────────────
 
-    /**
-     * @param _ticketPrice   Prix d'un ticket en wei (ex: 0.01 ether)
-     * @param _maxPlayers    Nombre max de participants (0 = illimité)
-     * @param _durationSecs  Durée d'un round en secondes
-     */
     constructor(
         uint256 _ticketPrice,
         uint256 _maxPlayers,
-        uint256 _durationSecs
-    ) Ownable(msg.sender) {
+        uint256 _durationSecs,
+        address _vrfCoordinator,
+        bytes32 _keyHash,
+        uint256 _subscriptionId
+    ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
         if (_ticketPrice == 0)  revert InvalidPrice();
         if (_durationSecs == 0) revert InvalidDuration();
+
+        i_vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
+        i_keyHash        = _keyHash;
+        i_subscriptionId = _subscriptionId;
 
         ticketPrice     = _ticketPrice;
         maxPlayers      = _maxPlayers;
         durationSeconds = _durationSecs;
+        // currentRoundId = 0 : aucun round actif, le owner démarre manuellement
+    }
 
+    // ─────────────────────────────────────────────────────────────
+    //  External — owner
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * @notice Démarre un nouveau round. Réservé au owner.
+     *         Impossible si un round est déjà OPEN ou en DRAWING.
+     */
+    function startRound() external onlyOwner noActiveRound {
         _startNewRound();
+    }
+
+    /**
+     * @notice Modifie le prix du ticket. Réservé au owner.
+     *         Impossible pendant un round actif.
+     */
+    function setTicketPrice(uint256 _newPrice) external onlyOwner noActiveRound {
+        if (_newPrice == 0) revert InvalidPrice();
+        emit TicketPriceUpdated(ticketPrice, _newPrice);
+        ticketPrice = _newPrice;
+    }
+
+    function setDuration(uint256 _newDuration) external onlyOwner noActiveRound {
+        if (_newDuration == 0) revert InvalidDuration();
+        emit DurationUpdated(durationSeconds, _newDuration);
+        durationSeconds = _newDuration;
+    }
+
+    function skipEmptyRound() external onlyOwner {
+        Round storage r = rounds[currentRoundId];
+        if (r.state != State.OPEN)       revert RoundAlreadyDrawing();
+        if (block.timestamp < r.endTime) revert RoundNotEnded();
+        if (r.players.length > 0)        revert RoundHasPlayers();
+
+        r.state = State.CLOSED;
+        emit RoundClosed(currentRoundId);
+    }
+
+    /**
+     * @notice Débloque un round coincé en DRAWING si Chainlink VRF ne répond pas.
+     *         Rembourse les participants. Réservé au owner.
+     */
+    function rescueStuckRound() external onlyOwner nonReentrant {
+        Round storage r = rounds[currentRoundId];
+        if (r.state != State.DRAWING) revert RoundNotOpen();
+
+        address[] memory players = r.players;
+        for (uint256 i = 0; i < players.length; i++) {
+            _safeTransfer(players[i], ticketPrice);
+        }
+
+        r.state     = State.CLOSED;
+        r.prizePool = 0;
+        emit RoundClosed(currentRoundId);
     }
 
     // ─────────────────────────────────────────────────────────────
     //  External — participants
     // ─────────────────────────────────────────────────────────────
 
-    /**
-     * @notice Achète un ou plusieurs tickets pour le round en cours.
-     *         Envoyer exactement ticketPrice * nombre de tickets en ETH.
-     * @param _amount Nombre de tickets à acheter
-     */
     function buyTickets(uint256 _amount) external payable roundIsOpen nonReentrant {
         if (_amount == 0 || msg.value != ticketPrice * _amount) revert NotEnoughETH();
 
         Round storage r = rounds[currentRoundId];
-
         if (block.timestamp >= r.endTime) revert RoundNotOpen();
-
-        if (maxPlayers > 0 && r.players.length + _amount > maxPlayers)
-            revert TooManyPlayers();
+        if (maxPlayers > 0 && r.players.length + _amount > maxPlayers) revert TooManyPlayers();
 
         for (uint256 i = 0; i < _amount; i++) {
             r.players.push(msg.sender);
@@ -128,40 +203,43 @@ contract Lottery is Ownable, ReentrancyGuard {
         emit TicketPurchased(currentRoundId, msg.sender, _amount);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  External — owner / keeper
-    // ─────────────────────────────────────────────────────────────
-
     /**
-     * @notice Déclenche le tirage du round courant.
-     *         Peut être appelé par n'importe qui une fois le round terminé.
+     * @notice Déclenche le tirage via Chainlink VRF v2.5.
+     *         Callable par n'importe qui une fois le round terminé.
      */
     function triggerDraw() external nonReentrant {
         Round storage r = rounds[currentRoundId];
-
         if (r.state != State.OPEN)       revert RoundAlreadyDrawing();
         if (block.timestamp < r.endTime) revert RoundNotEnded();
         if (r.players.length == 0)       revert NoPlayers();
 
         r.state = State.DRAWING;
-        emit DrawTriggered(currentRoundId);
 
-        // ⚠️  En production : utiliser Chainlink VRF ici et traiter dans fulfillRandomWords()
-        _pickWinner(currentRoundId, _pseudoRandom(currentRoundId));
+        uint256 requestId = i_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash:              i_keyHash,
+                subId:                i_subscriptionId,
+                requestConfirmations: REQUEST_CONFIRMATIONS,
+                callbackGasLimit:     CALLBACK_GAS_LIMIT,
+                numWords:             NUM_WORDS,
+                extraArgs:            VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({ nativePayment: false })
+                )
+            })
+        );
+
+        vrfRequestToRound[requestId] = currentRoundId;
+        emit DrawTriggered(currentRoundId, requestId);
     }
 
-    /**
-     * @notice Si personne n'a participé, le owner peut clôturer et démarrer un nouveau round.
-     */
-    function skipEmptyRound() external onlyOwner {
-        Round storage r = rounds[currentRoundId];
-        if (r.state != State.OPEN)        revert RoundAlreadyDrawing();
-        if (block.timestamp < r.endTime)  revert RoundNotEnded();
-        if (r.players.length > 0)         revert RoundHasPlayers();
+    // ─────────────────────────────────────────────────────────────
+    //  Chainlink VRF callback
+    // ─────────────────────────────────────────────────────────────
 
-        r.state = State.CLOSED;
-        emit RoundClosed(currentRoundId);
-        _startNewRound();
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) internal override {
+        uint256 roundId = vrfRequestToRound[requestId];
+        delete vrfRequestToRound[requestId];
+        _pickWinner(roundId, randomWords[0]);
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -182,6 +260,10 @@ contract Lottery is Ownable, ReentrancyGuard {
 
     function getRound(uint256 roundId) external view returns (Round memory) {
         return rounds[roundId];
+    }
+
+    function isRoundActive() external view returns (bool) {
+        return currentRoundId > 0 && rounds[currentRoundId].state == State.OPEN;
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -218,36 +300,13 @@ contract Lottery is Ownable, ReentrancyGuard {
 
         _safeTransfer(winner, prize);
         if (fee > 0) _safeTransfer(owner(), fee);
-
-        _startNewRound();
-    }
-
-    /**
-     * @dev Pseudo-aléatoire UNIQUEMENT pour tests/démo.
-     *      NE PAS utiliser en production : manipulable par les mineurs.
-     *      → Remplacer par Chainlink VRF v2 en production.
-     */
-    function _pseudoRandom(uint256 roundId) internal view returns (uint256) {
-        return uint256(
-            keccak256(
-                abi.encodePacked(
-                    blockhash(block.number - 1),
-                    block.timestamp,
-                    rounds[roundId].players.length,
-                    roundId
-                )
-            )
-        );
+        // Pas de _startNewRound() ici — le owner démarre le suivant manuellement
     }
 
     function _safeTransfer(address to, uint256 amount) internal {
         (bool ok, ) = payable(to).call{value: amount}("");
         if (!ok) revert TransferFailed();
     }
-
-    // ─────────────────────────────────────────────────────────────
-    //  Fallback — refuse les ETH directs pour éviter les accidents
-    // ─────────────────────────────────────────────────────────────
 
     receive() external payable {
         revert("Utilisez buyTickets()");

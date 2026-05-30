@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════
 //  CONFIG — mettre l'adresse du contrat ici
 // ═══════════════════════════════════════════
-const CONTRACT_ADDRESS = "0x1A0Cd4d17D7781C8B2D0183B528a5b1766291029"; // ex: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+const CONTRACT_ADDRESS = "0x9c4C56e5b2222Ab63EDDD495B746Adee024145C5"; // ex: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 // ═══════════════════════════════════════════
 
 // ───────────────────────────────────────────
@@ -18,13 +18,20 @@ const ABI = [
   "function getPlayers(uint256 roundId) view returns (address[])",
   "function getRound(uint256 roundId) view returns (tuple(uint256 id, uint256 startTime, uint256 endTime, uint256 ticketPrice, uint256 prizePool, address winner, uint8 state, address[] players))",
   "function buyTickets(uint256 _amount) payable",
+  "function startRound()",
+  "function setTicketPrice(uint256 _newPrice)",
+  "function setDuration(uint256 _newDuration)",
+  "function isRoundActive() view returns (bool)",
   "function triggerDraw()",
   "function skipEmptyRound()",
+  "function rescueStuckRound()",
   "function transferOwnership(address newOwner)",
   "function renounceOwnership()",
+  "event TicketPriceUpdated(uint256 oldPrice, uint256 newPrice)",
+  "event DurationUpdated(uint256 oldDuration, uint256 newDuration)",
   "event RoundStarted(uint256 indexed roundId, uint256 ticketPrice, uint256 endTime)",
   "event TicketPurchased(uint256 indexed roundId, address indexed player, uint256 tickets)",
-  "event DrawTriggered(uint256 indexed roundId)",
+  "event DrawTriggered(uint256 indexed roundId, uint256 requestId)",
   "event WinnerPicked(uint256 indexed roundId, address indexed winner, uint256 prize)",
   "event RoundClosed(uint256 indexed roundId)",
   "event OwnershipTransferred(address indexed previousOwner, address indexed newOwner)",
@@ -32,6 +39,7 @@ const ABI = [
   "error OwnableInvalidOwner(address owner)",
   "error RoundNotOpen()",
   "error RoundNotEnded()",
+  "error RoundAlreadyOpen()",
   "error RoundAlreadyDrawing()",
   "error NotEnoughETH()",
   "error TooManyPlayers()",
@@ -166,7 +174,13 @@ async function loadContract() {
 async function refreshData() {
   if (!contract) return;
   try {
-    roundData = await contract.getCurrentRound();
+    [roundData, ticketPrice] = await Promise.all([
+      contract.getCurrentRound(),
+      contract.ticketPrice(),
+    ]);
+    document.getElementById("s-price").textContent =
+      parseFloat(ethers.formatEther(ticketPrice)).toFixed(4);
+    updateCost();
     renderRound(roundData);
     await renderPlayers(roundData);
   } catch (e) {
@@ -175,8 +189,9 @@ async function refreshData() {
 }
 
 function enableButtons(on) {
-  ["btn-buy", "btn-draw", "btn-skip", "btn-refresh"].forEach((id) => {
-    document.getElementById(id).disabled = !on;
+  ["btn-buy", "btn-start", "btn-draw", "btn-skip", "btn-rescue", "btn-refresh", "btn-set-price", "btn-set-duration"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = !on;
   });
 }
 
@@ -184,10 +199,26 @@ function enableButtons(on) {
 // Render
 // ───────────────────────────────────────────
 function renderRound(r) {
-  const stateMap = ["OPEN", "DRAWING", "CLOSED"];
   const stateLabel = ["Ouvert", "Tirage…", "Terminé"];
   const stateClass = ["badge-open", "badge-draw", "badge-closed"];
   const s = Number(r.state);
+
+  // Aucun round démarré (id == 0)
+  if (r.id === 0n || r.id === 0) {
+    document.getElementById("r-id").textContent = "—";
+    document.getElementById("s-round").textContent = "—";
+    document.getElementById("s-state").textContent = "En attente";
+    document.getElementById("s-pool").textContent = "0.0000";
+    document.getElementById("s-players").textContent = "0";
+    document.getElementById("r-badge").className = "badge badge-closed";
+    document.getElementById("r-badge").innerHTML = '<span class="badge-dot"></span> En attente';
+    document.getElementById("r-timer").textContent = "Aucun round actif";
+    document.getElementById("r-progress").style.width = "0%";
+    document.getElementById("r-start").textContent = "—";
+    document.getElementById("r-end").textContent = "—";
+    if (timerInterval) clearInterval(timerInterval);
+    return;
+  }
 
   document.getElementById("r-id").textContent = "#" + r.id.toString();
   document.getElementById("s-round").textContent = "#" + r.id.toString();
@@ -217,7 +248,7 @@ function renderRound(r) {
     tickTimer(end, start);
   } else {
     document.getElementById("r-timer").textContent =
-      s === 2 ? "Terminé" : "En cours…";
+      s === 2 ? "Terminé" : "⏳ Attente Chainlink VRF…";
     document.getElementById("r-progress").style.width = s === 2 ? "0%" : "100%";
   }
 
@@ -348,11 +379,39 @@ async function buyTickets() {
 // ───────────────────────────────────────────
 // Admin actions
 // ───────────────────────────────────────────
+async function startRound() {
+  await adminAction("startRound", [], "▶ Round démarré");
+}
 async function triggerDraw() {
   await adminAction("triggerDraw", [], "⚡ Tirage déclenché");
 }
 async function skipRound() {
   await adminAction("skipEmptyRound", [], "↷ Round passé");
+}
+async function rescueRound() {
+  await adminAction("rescueStuckRound", [], "🚨 Round débloqué — participants remboursés");
+}
+async function updateTicketPrice() {
+  const input = document.getElementById("new-price-input");
+  const val   = input.value.trim();
+  if (!val || isNaN(val) || Number(val) <= 0) {
+    showAlert("err", "Prix invalide.");
+    return;
+  }
+  const wei = ethers.parseEther(val);
+  await adminAction("setTicketPrice", [wei], `Prix mis à jour : ${val} ETH`);
+  input.value = "";
+}
+
+async function updateDuration() {
+  const input = document.getElementById("new-duration-input");
+  const val   = parseInt(input.value.trim());
+  if (!val || val <= 0) {
+    showAlert("err", "Durée invalide.");
+    return;
+  }
+  await adminAction("setDuration", [val], `Durée mise à jour : ${val}s`);
+  input.value = "";
 }
 
 async function adminAction(method, args, label) {
@@ -360,9 +419,8 @@ async function adminAction(method, args, label) {
     showAlert("warn", "Connectez MetaMask.");
     return;
   }
-  const btn = document.getElementById(
-    "btn-" + (method === "triggerDraw" ? "draw" : "skip"),
-  );
+  const btnId = { startRound: "start", triggerDraw: "draw", skipEmptyRound: "skip", rescueStuckRound: "rescue", setTicketPrice: "set-price", setDuration: "set-duration" };
+  const btn = document.getElementById("btn-" + (btnId[method] || "draw"));
   btn.disabled = true;
   const origText = btn.textContent;
   btn.innerHTML = '<span class="spinner"></span>' + origText;
@@ -415,8 +473,10 @@ function subscribeEvents() {
     refreshData();
   });
 
-  contract.on("DrawTriggered", (roundId) => {
-    addLog("⚡", `Tirage déclenché — Round #${roundId}`);
+  contract.on("DrawTriggered", (roundId, requestId) => {
+    addLog("⚡", `Tirage déclenché — Round #${roundId} (requestId: ${requestId})`);
+    addLog("🔗", "En attente de la réponse Chainlink VRF…");
+    refreshData();
   });
 
   contract.on("WinnerPicked", (roundId, winner, prize) => {
@@ -429,7 +489,18 @@ function subscribeEvents() {
   });
 
   contract.on("RoundClosed", (roundId) => {
-    addLog("🔒", `Round #${roundId} clôturé`);
+    addLog("🔒", `Round #${roundId} clôturé — en attente du démarrage du prochain round`);
+    refreshData();
+  });
+
+  contract.on("TicketPriceUpdated", (oldPrice, newPrice) => {
+    const p = parseFloat(ethers.formatEther(newPrice)).toFixed(4);
+    addLog("💰", `Prix du ticket mis à jour : ${p} ETH`);
+    refreshData();
+  });
+
+  contract.on("DurationUpdated", (oldDuration, newDuration) => {
+    addLog("⏱", `Durée du round mise à jour : ${newDuration}s`);
   });
 }
 
@@ -475,8 +546,9 @@ function showToast(msg) {
 }
 
 const CONTRACT_ERRORS = {
-  RoundNotOpen:               "Le round n'est pas ouvert aux participations.",
+  RoundNotOpen:               "Aucun round actif — le owner doit démarrer un round.",
   RoundNotEnded:              "Le round n'est pas encore terminé — attendez la fin du timer.",
+  RoundAlreadyOpen:           "Un round est déjà en cours.",
   RoundAlreadyDrawing:        "Un tirage est déjà en cours pour ce round.",
   NotEnoughETH:               "Montant incorrect. Vérifiez le nombre de tickets et le prix.",
   TooManyPlayers:             "Capacité maximale du round atteinte.",
@@ -517,7 +589,20 @@ function parseError(e) {
   if (msg.includes("nonce"))
     return "Erreur de nonce — réinitialisez votre compte MetaMask (Paramètres → Avancé → Réinitialiser).";
 
-  // 4. Raison lisible
+  // 4. Erreurs connues du VRF Coordinator Chainlink
+  const VRF_ERRORS = {
+    "0x79bfd401": "Contrat non autorisé sur l'abonnement VRF — ajoutez ce contrat comme consumer sur vrf.chain.link",
+    "0x8f9a2d5b": "Abonnement VRF invalide — vérifiez le subscription ID",
+    "0x356680b7": "Balance LINK insuffisante sur l'abonnement VRF — rechargez sur vrf.chain.link",
+  };
+  if (data && VRF_ERRORS[data.slice(0, 10)])
+    return VRF_ERRORS[data.slice(0, 10)];
+
+  // 5. data=null — le RPC n'a pas retourné les données de revert
+  if (data === null || msg.includes("missing revert data"))
+    return "Transaction refusée par le contrat. Causes possibles : vous n'êtes pas le owner, ou le round n'est pas dans le bon état.";
+
+  // 5. Raison lisible
   if (e.reason) return e.reason;
   const match = msg.match(/reverted with reason string '(.+?)'/);
   if (match) return match[1];
