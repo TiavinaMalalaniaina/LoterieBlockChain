@@ -2,6 +2,7 @@
 //  CONFIG — mettre l'adresse du contrat ici
 // ═══════════════════════════════════════════
 const CONTRACT_ADDRESS = "0x9c4C56e5b2222Ab63EDDD495B746Adee024145C5"; // ex: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+// const CONTRACT_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"; // ex: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 // ═══════════════════════════════════════════
 
 // ───────────────────────────────────────────
@@ -95,8 +96,9 @@ async function connectWallet() {
     await provider.send("eth_requestAccounts", []);
     signer = await provider.getSigner();
     userAddress = await signer.getAddress();
-
+    
     const network = await provider.getNetwork();
+    console.log("CHAIN ID =", network.chainId);
     document.getElementById("wallet-dot").className = "dot on";
     document.getElementById("btn-connect-label").textContent = fmt(userAddress);
     document.getElementById("btn-connect").className = "connected";
