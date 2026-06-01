@@ -6,24 +6,43 @@ import "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
 
 /**
- * @dev Mock minimal du VRFCoordinator v2.5 pour les tests locaux Hardhat.
+ * @title VRFCoordinatorV2_5Mock
+ * @notice Mock minimal du coordinateur Chainlink VRF v2.5 pour les tests locaux Hardhat/Foundry.
+ * @dev Implémente IVRFCoordinatorV2Plus avec des stubs vides et une fonction
+ *       fulfillRandomWords() manuelle pour simuler la réponse Chainlink en environnement de test.
  */
 contract VRFCoordinatorV2_5Mock is IVRFCoordinatorV2Plus {
 
+    /// @dev Compteur auto-incrémenté pour générer des requestId uniques.
     uint256 private s_nextRequestId = 1;
+
+    /// @dev Compteur auto-incrémenté pour générer des subscriptionId uniques.
     uint256 private s_nextSubId     = 1;
 
+    /// @notice Données d'une requête VRF en attente de fulfillment.
     struct Request {
-        address consumer;
-        uint32  numWords;
+        address consumer;  ///< Adresse du contrat consommateur ayant fait la demande
+        uint32  numWords;  ///< Nombre de mots aléatoires demandés
     }
+
+    /// @notice Mapping requestId → données de la requête en attente.
     mapping(uint256 => Request) public s_requests;
 
+    /// @notice Émis lors d'une nouvelle demande de mots aléatoires.
+    /// @param requestId Identifiant unique de la requête.
+    /// @param subId Identifiant de la subscription utilisée.
     event RandomWordsRequested(uint256 indexed requestId, uint256 indexed subId);
+
+    /// @notice Émis après l'exécution du fulfillment d'une requête.
+    /// @param requestId Identifiant de la requête résolue.
     event RandomWordsFulfilled(uint256 indexed requestId);
 
     // ── IVRFCoordinatorV2Plus ──────────────────────────────────────
 
+    /// @notice Enregistre une nouvelle demande de mots aléatoires.
+    /// @dev Simule le comportement du vrai coordinateur : stocke la requête et émet un event.
+    /// @param req Paramètres de la requête VRF (keyHash, subId, numWords, etc.).
+    /// @return requestId Identifiant unique attribué à cette requête.
     function requestRandomWords(VRFV2PlusClient.RandomWordsRequest calldata req)
         external override returns (uint256 requestId)
     {
@@ -34,16 +53,26 @@ contract VRFCoordinatorV2_5Mock is IVRFCoordinatorV2Plus {
 
     // ── IVRFSubscriptionV2Plus ─────────────────────────────────────
 
+    /// @notice Crée une nouvelle subscription (stub de test).
+    /// @return subId Identifiant de la subscription créée.
     function createSubscription() external override returns (uint256 subId) {
         subId = s_nextSubId++;
     }
 
+    /// @notice Retourne les détails d'une subscription (stub — valeurs vides).
+    /// @return balance Solde LINK (toujours 0).
+    /// @return nativeBalance Solde natif (toujours 0).
+    /// @return reqCount Nombre de requêtes (toujours 0).
+    /// @return owner Propriétaire (toujours address(0)).
+    /// @return consumers Liste des consommateurs (toujours vide).
     function getSubscription(uint256) external pure override returns (
         uint96 balance, uint96 nativeBalance, uint64 reqCount, address owner, address[] memory consumers
     ) {
         return (0, 0, 0, address(0), new address[](0));
     }
 
+    /// @notice Retourne les IDs des subscriptions actives (stub — liste vide).
+    /// @return Tableau vide d'identifiants.
     function getActiveSubscriptionIds(uint256, uint256) external pure override returns (uint256[] memory) {
         return new uint256[](0);
     }

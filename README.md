@@ -154,3 +154,16 @@ Modifiables dans `scripts/deploy.js` avant le déploiement :
 5. Si personne n'a participé, le owner peut appeler `skipEmptyRound()`
 
 > **Note** : le tirage utilise un pseudo-aléatoire pour les tests locaux. En production, remplacer par [Chainlink VRF v2](https://docs.chain.link/vrf).
+
+
+## Contrat déployé
+
+| Réseau | Adresse |
+|---|---|
+| Sepolia | [`0x9c4C56e5b2222Ab63EDDD495B746Adee024145C5`](https://sepolia.etherscan.io/address/0x9c4C56e5b2222Ab63EDDD495B746Adee024145C5) |
+
+## Démo
+
+🎥 [Voir la vidéo de démonstration](https://www.loom.com/share/842cd047d7794d0db4744c00dc665bbb)
+
+🌐 [Frontend en ligne](https://tiavinamalalaniaina.github.io/LoterieBlockChain/front/)
